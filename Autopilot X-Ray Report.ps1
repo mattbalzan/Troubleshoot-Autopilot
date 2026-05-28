@@ -1,29 +1,21 @@
-﻿# --[ Autopilot X-Ray Report      ]
+# --[ Autopilot X-Ray Report      ]
 # --[ Matt Balzan | mattGPT.co.uk ]
 
 <#
-
     04.02.25 | Version 1.0 | Original.
-    05.02.25 | Version 1.1 | Added parse app names using GUID.
-    06.02.25 | Version 1.2 | Joined all results to show: Timestamp (local time) - Name - Status - Property.
-    07.02.25 | Version 1.3 | Added First Events, Intune Win Agent, Office & Autopilot data tables & Autopilot Deployment time
-    07.02.25 | Version 1.x | To-Do: 
-                             
-                             Platform scripts [HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\IntuneManagementExtension\Policies\*\a42b83a8-bab5-4eba-9cee-7424678a5d62]
-                             Remediation scripts [HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\IntuneManagementExtension\SideCarPolicies\Scripts\Reports\cfe1502e-51da-4e14-8fec-bdd040a29dde\50b112a5-65e7-4633-9363-d7dd6004b86c_1\Result]
-                             <![LOG[[PowerShell] Processing policy with id = a42b83a8-bab5-4eba-9cee-7424678a5d62 for user 00000000-0000-0000-0000-000000000000]LOG]!><time="15:09:33.9450446" date="2-4-2025" component="IntuneManagementExtension" context="" type="1" thread="14" file="">
-                             <![LOG[[PowerShell] Policy body = ﻿# --[ Debloat AppX Packages from Windows Image ]
-                             
-                             Test UWP User & Device deployed apps
-                             Get culture & OS, Patch info
+    28.05.26 | Version 2.0 | Post-build timeline snapshot with local log export.
 
+    Purpose:
+    Capture a timestamped Autopilot-first-event timeline after ESP completion,
+    including policies, apps, certs, Autopilot profile JSON, registration/enrollment,
+    platform scripts, remediation scripts, and Office install status.
 #>
 
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "SilentlyContinue"
 
 function getRegTime($regPath) {
-
-# --[ Dll import for RegQuery ]
-$signature = '[DllImport("advapi32.dll", CharSet = CharSet.Auto)]
+    $signature = '[DllImport("advapi32.dll", CharSet = CharSet.Auto)]
 public static extern Int32 RegQueryInfoKey(
 Microsoft.Win32.SafeHandles.SafeRegistryHandle hKey,
 StringBuilder lpClass,
@@ -33,408 +25,514 @@ Int32 vNLen, Int32 mvLen, Int32 secDesc,
 out System.Runtime.InteropServices.ComTypes.FILETIME lpftLastWriteTime
 );'
 
-
-    $typename = "RegQueryInfoKey.GetRegData"
-
-    # --[ Check if the type already exists ]
-    #if (-not [System.Management.Automation.PSTypeName]::new($typename).Type) {
-        
-    # --[ Add the type if it does not exist ]
-    $regData = Add-Type $signature -Name GetRegData -Namespace RegQueryInfoKey -Using System.Text -PassThru
-    #}
-            $reg = Get-Item $regPath -force
-
-                if ($reg.handle) {
-
-                $time = New-Object System.Runtime.InteropServices.ComTypes.FILETIME
-
-                $result = $regData::RegQueryInfoKey($reg.Handle, $null, 0,0,0,0,0,0,0,0,0, [ref]$time)
-
-                            if ($result -eq 0) {
-                            
-                                $low = [uint32]0 -bor $time.dwLowDateTime
-                                $high = [uint32]0 -bor $time.dwHighDateTime
-                                $timeValue = ([int64]$high -shl 32) -bor $low
-
-                            return [datetime]::FromFileTime($timeValue)
-                            }
-                }
-}
-
-
-# --[ Gather Autopilot JSON ]
-function Get-AutopilotStart{
-    $results = @()
-    
-    # --[ Import Autopilot Profile ]
-    $jsonFile = "$($env:WINDIR)\ServiceState\wmansvc\AutopilotDDSZTDFile.json" 
-    
-    
-    if(Test-Path $jsonFile){
-    
-    $json = Get-Content $jsonFile | ConvertFrom-Json
-    $date = $json.PolicyDownloadDate
-    
-    $results = [PSCustomObject]@{
-                                    Timestamp = [datetime]$date
-                                    Name = $json.DeploymentProfileName
-                                    Status = "Downloaded"
-                                    Property = "Autopilot Profile"
-                                }
-    
-    return $results
+    if (-not ([System.Management.Automation.PSTypeName]'RegQueryInfoKey.GetRegData').Type) {
+        $null = Add-Type $signature -Name GetRegData -Namespace RegQueryInfoKey -Using System.Text -PassThru
     }
 
-    else { return $false }
-}
-
-
-# --[ Get First Events data ]
-function Get-FirstEvents{
-$events = @()
-$results = @()
-
-# --[ Define Event Log Paths ]
-$eventLogs = @("microsoft-windows-devicemanagement-enterprise-diagnostics-provider/admin", "microsoft-windows-user device registration/admin")
-
-# --[ Event Message Mapping ]
-$messageMap = @{
-    101  = "Device Registration,Service Connection Point successful"
-    306  = "Device Registration,Hybrid AADJ device registration succeeded"
-    72   = "MDM Enrollment,Succeeded"
-    111  = "Device Registration,Starting wait for ODJ blob"
-    107  = "Device Registration,Successfully applied ODJ blob"
-    100  = "Device Registration,Could not establish connectivity"
-}
-
-# --[ Collect Events ]
-$eventLogs | % {
-    $events += Get-WinEvent -LogName $_ -Oldest | Where-Object { $_.Id -in $messageMap.Keys }
-}
-
-# --[ Track and Omit Event 100 if Event 101 Found ]
-$processedEvents = @()
-$event101Found = $false
-
-$events | % {
-
-    $messageParts = $messageMap[$_.Id] -split ",", 2  # Split into two parts
-    $results += [PSCustomObject]@{
-        Timestamp = $_.TimeCreated
-        Name      = $messageParts[0]  # The first part is Name
-        Status    = $messageParts[1]  # The second part is Status
-        Property  = "Device Phase 1"
-    }
-}
-
-    return $results
-
-}
-
-# --[ Get Sidecar installation time ]
-function Get-SidecarData{
-
-$sidecarRegKey = Get-Item -Path "HKLM:\SOFTWARE\Microsoft\IntuneWindowsAgent"
-
-$Timecreated = getRegTime ($sidecarRegKey -replace "HKEY_LOCAL_MACHINE","HKLM:")
-
-    $results = [PSCustomObject]@{
-                                        Timestamp = [datetime]$Timecreated
-                                        Name = "Intune Windows Agent"
-                                        Status = "Installed"
-                                        Property = "Sidecar"
-                                    }
-    
-        return $results
-
-}
-
-
-function Get-AutopilotJSONdata{
-    # --[ Retrieve AutoPilot Configuration Values ]
-    $values = Get-ItemProperty "HKLM:\Software\Microsoft\Provisioning\Diagnostics\AutoPilot"
-    $flags = $values.CloudAssignedOobeConfig
-
-    # --[ Define Configuration Settings with Bitwise Masks ]
-    $configurations = @(
-        @{ Name = "Skip keyboard";           Mask = 1024 }
-        @{ Name = "Enable patch download";   Mask = 512 }
-        @{ Name = "Skip Windows upgrade UX"; Mask = 256 }
-        @{ Name = "AAD TPM Required";        Mask = 128 }
-        @{ Name = "AAD device auth";         Mask = 64 }
-        @{ Name = "TPM attestation";         Mask = 32 }
-        @{ Name = "Skip EULA";               Mask = 16 }
-        @{ Name = "Skip OEM registration";   Mask = 8 }
-        @{ Name = "Skip express settings";   Mask = 4 }
-        @{ Name = "Disallow admin";          Mask = 2 }
-    )
-
-    # --[ Generate ASCII Table Header ]
-    $border = "+----------------------------+---------+---------+"
-    $header = "| Autopilot JSON Settings    | Enabled | BitMask |"
-    Write-Host $border
-    Write-Host $header
-    Write-Host $border
-
-    # --[ Generate and Display ASCII Table Rows ]
-    $configurations | ForEach-Object {
-        $enabled = If (($flags -band $_.Mask) -gt 0) { "Yes" } Else { "No" }
-        $bitMask = "$(($_.Mask).ToString("X").PadLeft(4,'0'))"
-        Write-Host ("| {0,-26} | {1,-7} | {2,-7} |" -f $_.Name, $enabled, $bitMask)
+    $reg = Get-Item -Path $regPath -Force
+    if (-not $reg -or -not $reg.Handle) {
+        return $null
     }
 
-    Write-Host $border
-
-}
-
-# --[ Office data ]
-function Get-OfficeInstallData{
-# --[ Retrieve OfficeCSP Configuration Values ]
-$OfficeCSP = Get-ChildItem "HKLM:\SOFTWARE\Microsoft\OfficeCSP" -ErrorAction SilentlyContinue
-
-if($OfficeCSP){
-
-$OfficeStatus = @{
-    "0" = "None"; "10" = "Initialized"; "20" = "Download In Progress"; "25" = "Pending Download Retry";
-    "30" = "Download Failed"; "40" = "Download Completed"; "48" = "Pending User Session"; "50" = "Enforcement In Progress"; 
-    "55" = "Pending Enforcement Retry"; "60" = "Enforcement Failed"; "70" = "Success / Enforcement Completed"
-}
-
-# --[ Generate ASCII Table Header ]
-$border = "+----------------------+------------------------------------------------------------------+"
-$header = "| Office Config XML    | Value                                                            |"
-Write-Host $border
-Write-Host $header
-Write-Host $border
-
-foreach ($key in $OfficeCSP) {
-    $OfficeState = Get-ItemProperty -Path $key.PSPath -Name FinalStatus -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FinalStatus
-    $OfficeConfig = Get-ItemProperty -Path $key.PSPath -Name "(default)" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "(default)"
-    
-    $OfficeStateText = if ($OfficeState) { $OfficeStatus[$OfficeState.ToString()] } else { "Unknown" }
-    
-    Write-Host ("| {0,-20} | {1,-64} |" -f "Office Status", $OfficeStateText)
-    
-    if ($OfficeConfig) {
-        [xml]$ConfigXml = $OfficeConfig
-        
-        # --[ Extract Values from XML ]
-        $channel = $ConfigXml.Configuration.Add.Channel
-        $officeEdition = $ConfigXml.Configuration.Add.OfficeClientEdition
-        $migrateArch = $ConfigXml.Configuration.Add.MigrateArch
-        $productID = $ConfigXml.Configuration.Add.Product.ID
-        $excludedApps = ($ConfigXml.Configuration.Add.Product.ExcludeApp | ForEach-Object { $_.ID }) -join ", "
-        $languages = ($ConfigXml.Configuration.Add.Product.Language | ForEach-Object { $_.ID }) -join ", "
-        $displayLevel = $ConfigXml.Configuration.Display.Level
-        $acceptEULA = $ConfigXml.Configuration.Display.AcceptEULA
-        $appSettings = ($ConfigXml.Configuration.AppSettings.User.Id) -join ", "
-        $removeMSI = [bool]$ConfigXml.Configuration.RemoveMSI
-        $sharedComputerLicensing = $ConfigXml.Configuration.Property | Where-Object { $_.Name -eq "SharedComputerLicensing" } | Select-Object -ExpandProperty Value
-        $lastExecuteTime = $ConfigXml.Configuration.LastExecuteTime.'#text'
-        
-        Write-Host ("| {0,-20} | {1,-64} |" -f "Channel", $channel)
-        Write-Host ("| {0,-20} | {1,-64} |" -f "Office Edition", $officeEdition)
-        Write-Host ("| {0,-20} | {1,-64} |" -f "Migrate Arch", $migrateArch)
-        Write-Host ("| {0,-20} | {1,-64} |" -f "Product ID", $productID)
-        Write-Host ("| {0,-20} | {1,-64} |" -f "Excluded Apps", $excludedApps)
-        Write-Host ("| {0,-20} | {1,-64} |" -f "Languages", $languages)
-        Write-Host ("| {0,-20} | {1,-64} |" -f "Display Level", $displayLevel)
-        Write-Host ("| {0,-20} | {1,-64} |" -f "Accept EULA", $acceptEULA)
-        Write-Host ("| {0,-20} | {1,-64} |" -f "Remove MSI", $removeMSI)
-        Write-Host ("| {0,-20} | {1,-64} |" -f "Shared Licensing", $sharedComputerLicensing)
-        Write-Host ("| {0,-20} | {1,-64} |" -f "App Settings", $appSettings)
-        Write-Host ("| {0,-20} | {1,-64} |" -f "Last Execute Time", $lastExecuteTime)
-        Write-Host $border
+    $time = New-Object System.Runtime.InteropServices.ComTypes.FILETIME
+    $result = [RegQueryInfoKey.GetRegData]::RegQueryInfoKey($reg.Handle, $null, 0, 0, 0, 0, 0, 0, 0, 0, 0, [ref]$time)
+    if ($result -ne 0) {
+        return $null
     }
-    
-  }
 
+    $low = [uint32]0 -bor $time.dwLowDateTime
+    $high = [uint32]0 -bor $time.dwHighDateTime
+    $timeValue = ([int64]$high -shl 32) -bor $low
+    return [datetime]::FromFileTime($timeValue)
 }
 
-else { return "No M365 Apps deployed "}
-}
-
-# --[ Function to parse policies from registry ]
-function Get-PoliciesData{
-    $results = @()
-
-    # --[ Gather ID data from registry ]
-    $EnrollmentID = (Get-ChildItem -Path "C:\ProgramData\Microsoft\DMClient\*").Name
-    $UserSID = (Get-ChildItem "HKLM:\SOFTWARE\Microsoft\EnterpriseResourceManager\Tracked\$EnrollmentID" | Select -Last 1).PSChildName
-    $regPath = "HKLM:\SOFTWARE\Microsoft\PolicyManager"
-
-    $PolicyPaths = @( "$regPath\providers\$EnrollmentID\default\Device\*")
-        $PolicyPaths | % {
-                $regKeys = Get-ChildItem -Path $_
-                    foreach($reg in $regKeys.Name) {
-            
-                        $policyProcessed  = getRegTime ($reg -replace "HKEY_LOCAL_MACHINE","HKLM:")
-                        $policyName = [regex]::Match($reg, '[^\\]+$').Value 
-                     
-                            $results += [PSCustomObject]@{
-                                    Timestamp = [datetime]$policyProcessed
-                                    Name = $policyName
-                                    Status = "Processed"
-                                    Property = "Policy"
-                                }
-                }
-        }
-        return $results
-}
-
-# --[ Define registry base keys to scan ]
-$registryPaths = @(
-    "HKLM:\SOFTWARE\Microsoft\Windows\Autopilot\EnrollmentStatusTracking\ESPTrackingInfo\Diagnostics\Expected*",
-    "HKLM:\SOFTWARE\Microsoft\Windows\Autopilot\EnrollmentStatusTracking\ESPTrackingInfo\Diagnostics\S-*\Expected*"
-)
-
-$sidecarPath = "HKLM:\SOFTWARE\Microsoft\Windows\Autopilot\EnrollmentStatusTracking\ESPTrackingInfo\Diagnostics\Sidecar"
-
-# --[ Define status mappings ]
-$statusMapping = @{
-    "1" = "Not Installed"
-    "2" = "In Progress"
-    "3" = "Completed"
-    "4" = "Error"
-}
-
-$espStatus = @{
-    "0" = "Not Processed"
-    "1" = "Processed"
-    "60" = "Failed"
-    "70" = "Completed"
-}
-
-# --[ Function to parse Sidecar registry data ]
-function Get-AppsData {
-    $results = @()
-    if (Test-Path $sidecarPath) {
-        Get-ChildItem -Path $sidecarPath -Recurse | Where-Object { $_.PSChildName -ne "LastLoggedState" } | ForEach-Object {
-            $timestamp = [datetime]::Parse($_.PSChildName)
-            Get-ItemProperty -Path $_.PsPath | ForEach-Object {
-                $_.PSObject.Properties | Where-Object { $_.Name -match "Win32App_" -and $_.Name -notmatch "PS(Path|ParentPath|ChildName|Provider)" } | ForEach-Object {
-                    $guid = $_.Name -replace "^.*Win32App_", "" -replace "_\d+$", ""
-                    $results += [PSCustomObject]@{
-                        Timestamp = $timestamp
-                        Name = Get-AppName $guid
-                        Status = $statusMapping[[string]$_.Value]
-                        Property = "Win32App"
-                    }
-                }
-            }
-        }
-    }
-    return $results
-}
-
-# --[ Function to parse ESP registry data ]
-function Get-ESPStatusData {
+function New-TimelineRecord {
     param(
-        [string]$basePath
+        [datetime]$Timestamp,
+        [string]$Name,
+        [string]$Status,
+        [string]$Property,
+        [string]$Source,
+        [string]$Details
     )
-    
-    $results = @()
-    Get-ChildItem -Path $basePath -Recurse | ForEach-Object {
-        $timestamp = [datetime]::Parse($_.PSChildName)
-        Get-ItemProperty -Path $_.PsPath | ForEach-Object {
-            $_.PSObject.Properties | Where-Object { $_.Name -notmatch "PS(Path|ParentPath|ChildName|Provider)" } | ForEach-Object {
-                $propertyName = $_.Name
-                $propertyValue = $_.Value
-                
-                $name = switch -Wildcard ($propertyName) {
-                    "./Device/Vendor/MSFT/EnterpriseDesktopAppManagement/MSI/" { [URI]::UnescapeDataString(($propertyName.Split("/"))[6]);$prop = "track this unknown"} 
-                   
-                    "./User/Vendor/MSFT/EnterpriseModernAppManagement/AppManagement/*" { [URI]::UnescapeDataString(($propertyName.Split("/"))[7]); $prop = "USER UWP" }
-                    "./Device/Vendor/MSFT/EnterpriseModernAppManagement/AppManagement/*" {[URI]::UnescapeDataString(($propertyName.Split("/"))[7]); $prop ="DEVICE UWP" }
-                    "./User/Vendor/MSFT/ClientCertificateInstall/*" {[URI]::UnescapeDataString(($propertyName.Split("/"))[6]) ; $prop = "User Certificate"}
-                    "./Device/Vendor/MSFT/ClientCertificateInstall/*" {[URI]::UnescapeDataString(($propertyName.Split("/"))[6]) ; $prop = "Device Certificate"}
-                    "./Vendor/MSFT/Office/Installation*" { "Office Installation" ; $prop = "M365 APPS"}
-                    "./Device/Vendor/MSFT/WiFi/Profile/*" { $propertyName -replace "^./Device/Vendor/MSFT/WiFi/Profile/", ""; $prop = "WiFi Profile" }
-                    "./Vendor/MSFT/DMClient/Provider/MS%20DM%20Server/EntDMID" `
-                    {$p++; if($p -ge 1){$propertyName -replace "./Vendor/MSFT/DMClient/Provider/MS%20DM%20Server/EntDMID","Device Phase Completed";$prop = "ESP Phase"}else{$propertyName -replace "./Vendor/MSFT/DMClient/Provider/MS%20DM%20Server/EntDMID","Account Phase Completed";$prop = "ESP Phase"}}
-                    Default { $propertyName }
-                }
 
-                $results += [PSCustomObject]@{
-                    Timestamp = $timestamp
-                    Name = $name
-                    Status = $espStatus[[string]$propertyValue]
-                    Property = $prop
-                }
+    if (-not $Timestamp) {
+        return $null
+    }
+
+    [PSCustomObject]@{
+        Timestamp = $Timestamp
+        Name = $Name
+        Status = $Status
+        Property = $Property
+        Source = $Source
+        Details = $Details
+    }
+}
+
+function New-LocalLogContext {
+    $root = Join-Path $env:ProgramData "AutopilotXRay"
+    $null = New-Item -Path $root -ItemType Directory -Force
+
+    $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $base = "Autopilot_XRay_$($env:COMPUTERNAME)_$stamp"
+
+    [PSCustomObject]@{
+        Root = $root
+        TextLog = Join-Path $root "$base.log"
+        CsvLog = Join-Path $root "$base.csv"
+        JsonLog = Join-Path $root "$base.json"
+    }
+}
+
+function Write-LocalLogLine {
+    param(
+        [string]$Path,
+        [string]$Message
+    )
+    "$(Get-Date -Format "yyyy-MM-dd HH:mm:ss") $Message" | Out-File -FilePath $Path -Append -Encoding utf8
+}
+
+function Convert-IMELogTimestamp {
+    param(
+        [string]$DatePart,
+        [string]$TimePart
+    )
+
+    if (-not $DatePart -or -not $TimePart) {
+        return $null
+    }
+
+    $cleanTime = ($TimePart -split "\+")[0]
+    $value = "$DatePart $cleanTime"
+    $formats = @(
+        "M-d-yyyy H:mm:ss.fffffff",
+        "M-d-yyyy HH:mm:ss.fffffff",
+        "M-d-yyyy H:mm:ss",
+        "M-d-yyyy HH:mm:ss",
+        "MM-dd-yyyy HH:mm:ss.fffffff",
+        "MM-dd-yyyy HH:mm:ss"
+    )
+
+    foreach ($format in $formats) {
+        $parsed = $null
+        if ([datetime]::TryParseExact($value, $format, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeLocal, [ref]$parsed)) {
+            return $parsed
+        }
+    }
+
+    return (Get-Date $value)
+}
+
+function Get-IMELogEntries {
+    $entries = @()
+    $logFolder = "C:\ProgramData\Microsoft\IntuneManagementExtension\Logs"
+    if (-not (Test-Path $logFolder)) {
+        return $entries
+    }
+
+    $logFiles = Get-ChildItem -Path $logFolder -File -Filter "*.log"
+    $pattern = '<!\[LOG\[(?<msg>.*?)\]LOG\]!><time="(?<time>[^"]+)" date="(?<date>[^"]+)" component="(?<component>[^"]*)" context="(?<context>[^"]*)" type="(?<type>[^"]*)" thread="(?<thread>[^"]*)" file="(?<file>[^"]*)">'
+
+    foreach ($file in $logFiles) {
+        foreach ($line in (Get-Content -Path $file.FullName)) {
+            $match = [regex]::Match($line, $pattern)
+            if (-not $match.Success) {
+                continue
+            }
+
+            $entries += [PSCustomObject]@{
+                Timestamp = Convert-IMELogTimestamp -DatePart $match.Groups["date"].Value -TimePart $match.Groups["time"].Value
+                Message = $match.Groups["msg"].Value
+                Component = $match.Groups["component"].Value
+                File = $file.Name
             }
         }
     }
+
+    return ($entries | Where-Object { $_.Timestamp } | Sort-Object Timestamp)
+}
+
+function Get-AppNameMapFromIME {
+    param([array]$IMEEntries)
+
+    $map = @{}
+    foreach ($entry in $IMEEntries) {
+        $m = [regex]::Match($entry.Message, '"Id":"(?<id>[0-9a-fA-F-]{36})","Name":"(?<name>.*?)"')
+        if ($m.Success -and -not $map.ContainsKey($m.Groups["id"].Value)) {
+            $map[$m.Groups["id"].Value] = $m.Groups["name"].Value
+        }
+    }
+    return $map
+}
+
+function Resolve-AppName {
+    param(
+        [string]$AppId,
+        [hashtable]$AppMap
+    )
+
+    if ($AppMap.ContainsKey($AppId)) {
+        return $AppMap[$AppId]
+    }
+
+    return "Unknown App ($AppId)"
+}
+
+function Get-AutopilotProfileEvent {
+    $jsonFile = "$($env:WINDIR)\ServiceState\wmansvc\AutopilotDDSZTDFile.json"
+    if (-not (Test-Path $jsonFile)) {
+        return $null
+    }
+
+    $json = Get-Content -Path $jsonFile -Raw | ConvertFrom-Json
+    return (New-TimelineRecord -Timestamp ([datetime]$json.PolicyDownloadDate) -Name $json.DeploymentProfileName -Status "Downloaded" -Property "Autopilot Profile" -Source "JSON" -Details $jsonFile)
+}
+
+function Get-DeviceRegistrationEvents {
+    $results = @()
+    $eventSources = @(
+        @{ Log = "Microsoft-Windows-User Device Registration/Admin"; Ids = @(100, 101, 104, 106, 107, 109, 111, 306) },
+        @{ Log = "Microsoft-Windows-DeviceManagement-Enterprise-Diagnostics-Provider/Admin"; Ids = @(70, 71, 72, 75) }
+    )
+
+    $messages = @{
+        70 = @{ Name = "MDM Enrollment"; Status = "Started" }
+        71 = @{ Name = "MDM Enrollment"; Status = "In Progress" }
+        72 = @{ Name = "MDM Enrollment"; Status = "Succeeded" }
+        75 = @{ Name = "MDM Enrollment"; Status = "Failed" }
+        100 = @{ Name = "Device Registration"; Status = "Connectivity Issue" }
+        101 = @{ Name = "Device Registration"; Status = "Service Connection Point successful" }
+        104 = @{ Name = "Device Registration"; Status = "Join task started" }
+        106 = @{ Name = "Device Registration"; Status = "Join in progress" }
+        107 = @{ Name = "Device Registration"; Status = "ODJ blob applied" }
+        109 = @{ Name = "Device Registration"; Status = "Join completed" }
+        111 = @{ Name = "Device Registration"; Status = "Waiting for ODJ blob" }
+        306 = @{ Name = "Device Registration"; Status = "Hybrid AADJ registration succeeded" }
+    }
+
+    foreach ($source in $eventSources) {
+        $events = Get-WinEvent -LogName $source.Log -Oldest | Where-Object { $_.Id -in $source.Ids }
+        foreach ($evt in $events) {
+            $details = if ($evt.Message.Length -gt 180) { $evt.Message.Substring(0, 180) } else { $evt.Message }
+            $results += New-TimelineRecord -Timestamp $evt.TimeCreated -Name $messages[$evt.Id].Name -Status $messages[$evt.Id].Status -Property "Enrollment" -Source $source.Log -Details $details
+        }
+    }
+
     return $results
 }
 
-# --[ Search logs for application names ]
-$logContent = Get-Content -Path "C:\ProgramData\Microsoft\IntuneManagementExtension\Logs\AppW*.log" -Raw
-function Get-AppName {
-    param([string]$guid)
-    $pattern = '"Id":"' + [regex]::Escape($guid) + '","Name":"(.*?)"'
-    if ($logContent -match $pattern) {
-        return $matches[1]
+function Get-PolicyEvents {
+    $results = @()
+    $policyRoot = "HKLM:\SOFTWARE\Microsoft\PolicyManager\Providers"
+
+    if (-not (Test-Path $policyRoot)) {
+        return $results
     }
-    return "Unknown"
-}
 
-
-# --[ Gather Autopilot Profile data ]
-$autopilotResults = Get-AutopilotStart
-
-if ($autopilotResults -ne $false){
-
-        # --[ Gathet First Events data ]
-        $firsteventsResults = Get-FirstEvents
-
-        # --[ Gather Policies registry data ]
-        $policyResults = Get-PoliciesData
-
-        # --[ Gather Sidecar registry data ]
-        $sidecarResults = Get-SidecarData
-
-        # --[ Gather Apps registry data ]
-        $appsResults = Get-AppsData
-
-        # --[ Gather ESP status data ]
-        $espResults = @()
-        foreach ($path in $registryPaths) {
-            $espResults += Get-ESPStatusData -basePath $path
+    $providerRoots = Get-ChildItem -Path $policyRoot
+    foreach ($provider in $providerRoots) {
+        $devicePath = Join-Path $provider.PSPath "default\Device"
+        if (-not (Test-Path $devicePath)) {
+            continue
         }
 
-        # --[ Output results sorted by timestamp ]
-        $finalResults = @()
-        $finalResults += $autopilotResults
-        $finalResults += $firsteventsResults
-        $finalResults += $appsResults
-        $finalResults += $policyResults
-        $finalResults += $sidecarResults
-        $finalResults += $espResults
-
-
-        $finalResults = $finalResults | Sort-Object Timestamp
-
-        $finalResults | Format-Table Timestamp, Name, Status, Property -AutoSize
-        "`n"
-
-        # --[ Calculate the Total Autopilot time ]
-        $timeDifference = $finalResults[-1].Timestamp - $finalResults[0].Timestamp
-        
-        $AutopilotDeploymentTime = 
-        $timeDifference | % { "$($_.Hours)h $($_.Minutes)m $($_.Seconds)s" }
-
-        Write-Host "Autopilot Deployment Time: $AutopilotDeploymentTime`n`n"
-
-        # --[ Output Autopilot JSON data ]
-        Get-AutopilotJSONdata
-        "`n"
-
-        # --[ Output M365 Apps data ]
-        Get-OfficeInstallData
-    }
-else 
-    {
-        Write-Host "This is not an Autopilot device."
+        foreach ($key in (Get-ChildItem -Path $devicePath)) {
+            $regPath = $key.Name -replace "HKEY_LOCAL_MACHINE", "HKLM:"
+            $timestamp = getRegTime -regPath $regPath
+            $results += New-TimelineRecord -Timestamp $timestamp -Name $key.PSChildName -Status "Processed" -Property "Policy" -Source "Registry" -Details $provider.PSChildName
+        }
     }
 
-# --[ End of script ]
+    return $results
+}
+
+function Get-SidecarInstallEvent {
+    $path = "HKLM:\SOFTWARE\Microsoft\IntuneWindowsAgent"
+    if (-not (Test-Path $path)) {
+        return $null
+    }
+
+    $timestamp = getRegTime -regPath $path
+    return (New-TimelineRecord -Timestamp $timestamp -Name "Intune Windows Agent" -Status "Installed" -Property "IME" -Source "Registry" -Details $path)
+}
+
+function Get-ESPStatusEvents {
+    param([hashtable]$AppMap)
+
+    $results = @()
+    $espRoots = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\Autopilot\EnrollmentStatusTracking\ESPTrackingInfo\Diagnostics\Expected*",
+        "HKLM:\SOFTWARE\Microsoft\Windows\Autopilot\EnrollmentStatusTracking\ESPTrackingInfo\Diagnostics\S-*\Expected*"
+    )
+
+    $espState = @{ "0" = "Not Processed"; "1" = "Processed"; "60" = "Failed"; "70" = "Completed" }
+
+    foreach ($root in $espRoots) {
+        foreach ($key in (Get-ChildItem -Path $root -Recurse)) {
+            $stamp = $null
+            if (-not [datetime]::TryParse($key.PSChildName, [ref]$stamp)) {
+                continue
+            }
+
+            $props = Get-ItemProperty -Path $key.PSPath
+            foreach ($prop in $props.PSObject.Properties) {
+                if ($prop.Name -match "^PS") {
+                    continue
+                }
+
+                $propertyGroup = "ESP"
+                $name = $prop.Name
+                if ($prop.Name -like "./User/Vendor/MSFT/ClientCertificateInstall/*") {
+                    $name = [URI]::UnescapeDataString(($prop.Name.Split("/"))[6])
+                    $propertyGroup = "User Certificate"
+                } elseif ($prop.Name -like "./Device/Vendor/MSFT/ClientCertificateInstall/*") {
+                    $name = [URI]::UnescapeDataString(($prop.Name.Split("/"))[6])
+                    $propertyGroup = "Device Certificate"
+                } elseif ($prop.Name -like "./Vendor/MSFT/Office/Installation*") {
+                    $name = "Office Installation"
+                    $propertyGroup = "M365 Apps"
+                } elseif ($prop.Name -like "./Device/Vendor/MSFT/EnterpriseModernAppManagement/AppManagement/*") {
+                    $raw = [URI]::UnescapeDataString(($prop.Name.Split("/"))[7])
+                    if ($raw -match "[0-9a-fA-F-]{36}") {
+                        $name = Resolve-AppName -AppId $matches[0] -AppMap $AppMap
+                    } else {
+                        $name = $raw
+                    }
+                    $propertyGroup = "Device UWP"
+                } elseif ($prop.Name -like "./User/Vendor/MSFT/EnterpriseModernAppManagement/AppManagement/*") {
+                    $name = [URI]::UnescapeDataString(($prop.Name.Split("/"))[7])
+                    $propertyGroup = "User UWP"
+                }
+
+                $status = if ($espState.ContainsKey([string]$prop.Value)) { $espState[[string]$prop.Value] } else { [string]$prop.Value }
+                $results += New-TimelineRecord -Timestamp $stamp -Name $name -Status $status -Property $propertyGroup -Source "ESP Registry" -Details $prop.Name
+            }
+        }
+    }
+
+    return $results
+}
+
+function Get-Win32AppEvents {
+    param([hashtable]$AppMap)
+
+    $results = @()
+    $sidecarPath = "HKLM:\SOFTWARE\Microsoft\Windows\Autopilot\EnrollmentStatusTracking\ESPTrackingInfo\Diagnostics\Sidecar"
+    $statusMap = @{ "1" = "Not Installed"; "2" = "In Progress"; "3" = "Completed"; "4" = "Error" }
+
+    if (-not (Test-Path $sidecarPath)) {
+        return $results
+    }
+
+    foreach ($key in (Get-ChildItem -Path $sidecarPath -Recurse | Where-Object { $_.PSChildName -ne "LastLoggedState" })) {
+        $stamp = $null
+        if (-not [datetime]::TryParse($key.PSChildName, [ref]$stamp)) {
+            continue
+        }
+
+        $props = Get-ItemProperty -Path $key.PSPath
+        foreach ($prop in $props.PSObject.Properties) {
+            if ($prop.Name -notmatch "Win32App_" -or $prop.Name -match "^PS") {
+                continue
+            }
+
+            $id = $prop.Name -replace "^.*Win32App_", "" -replace "_\d+$", ""
+            $appName = Resolve-AppName -AppId $id -AppMap $AppMap
+            $status = if ($statusMap.ContainsKey([string]$prop.Value)) { $statusMap[[string]$prop.Value] } else { [string]$prop.Value }
+
+            $results += New-TimelineRecord -Timestamp $stamp -Name $appName -Status $status -Property "Win32App" -Source "ESP Sidecar" -Details $id
+        }
+    }
+
+    return $results
+}
+
+function Get-PlatformScriptEvents {
+    $results = @()
+    $root = "HKLM:\SOFTWARE\Microsoft\IntuneManagementExtension\Policies"
+
+    if (-not (Test-Path $root)) {
+        return $results
+    }
+
+    $keys = Get-ChildItem -Path $root -Recurse | Where-Object { $_.PSChildName -match "^[0-9a-fA-F-]{36}$" }
+    foreach ($key in $keys) {
+        $timestamp = getRegTime -regPath ($key.Name -replace "HKEY_LOCAL_MACHINE", "HKLM:")
+        $results += New-TimelineRecord -Timestamp $timestamp -Name $key.PSChildName -Status "Processed" -Property "Platform Script" -Source "IME Registry" -Details $key.Name
+    }
+
+    return $results
+}
+
+function Get-RemediationScriptEvents {
+    $results = @()
+    $root = "HKLM:\SOFTWARE\Microsoft\IntuneManagementExtension\SideCarPolicies\Scripts\Reports"
+
+    if (-not (Test-Path $root)) {
+        return $results
+    }
+
+    $resultKeys = Get-ChildItem -Path $root -Recurse | Where-Object { $_.PSChildName -eq "Result" }
+    foreach ($key in $resultKeys) {
+        $timestamp = getRegTime -regPath ($key.Name -replace "HKEY_LOCAL_MACHINE", "HKLM:")
+        $parent = Split-Path -Path $key.PSPath -Parent
+        $scriptNode = Split-Path -Path $parent -Leaf
+        $assignmentNode = Split-Path -Path (Split-Path -Path $parent -Parent) -Leaf
+
+        $statusText = "Completed"
+        $values = Get-ItemProperty -Path $key.PSPath
+        if ($values.PSObject.Properties.Name -contains "ErrorCode" -and [int]$values.ErrorCode -ne 0) {
+            $statusText = "Failed"
+        }
+
+        $results += New-TimelineRecord -Timestamp $timestamp -Name "$assignmentNode / $scriptNode" -Status $statusText -Property "Remediation Script" -Source "IME Registry" -Details $key.Name
+    }
+
+    return $results
+}
+
+function Get-IMEProcessingEvents {
+    param(
+        [array]$IMEEntries,
+        [hashtable]$AppMap
+    )
+
+    $results = @()
+    foreach ($entry in $IMEEntries) {
+        $msg = $entry.Message
+
+        if ($msg -match '(?i)processing policy with id\s*=\s*(?<id>[0-9a-fA-F-]{36})') {
+            $results += New-TimelineRecord -Timestamp $entry.Timestamp -Name $matches["id"] -Status "Processing" -Property "Platform Script" -Source $entry.File -Details $msg
+            continue
+        }
+
+        if ($msg -match '(?i)remediation' -and $msg -match '(?<id>[0-9a-fA-F-]{36})') {
+            $status = if ($msg -match '(?i)fail|error') { "Failed" } elseif ($msg -match '(?i)success|completed') { "Completed" } else { "Processing" }
+            $results += New-TimelineRecord -Timestamp $entry.Timestamp -Name $matches["id"] -Status $status -Property "Remediation Script" -Source $entry.File -Details $msg
+            continue
+        }
+
+        if ($msg -match '(?i)win32app|app installation|enforcement') {
+            $guidMatch = [regex]::Match($msg, '(?<id>[0-9a-fA-F-]{36})')
+            if ($guidMatch.Success) {
+                $appName = Resolve-AppName -AppId $guidMatch.Groups["id"].Value -AppMap $AppMap
+                $status = if ($msg -match '(?i)fail|error') { "Failed" } elseif ($msg -match '(?i)success|completed|installed') { "Completed" } else { "Processing" }
+                $results += New-TimelineRecord -Timestamp $entry.Timestamp -Name $appName -Status $status -Property "Win32App" -Source $entry.File -Details $msg
+            }
+        }
+    }
+
+    return $results
+}
+
+function Get-OfficeInstallEvents {
+    $results = @()
+    $officeRoot = "HKLM:\SOFTWARE\Microsoft\OfficeCSP"
+    if (-not (Test-Path $officeRoot)) {
+        return $results
+    }
+
+    $statusMap = @{
+        "0" = "None"
+        "10" = "Initialized"
+        "20" = "Download In Progress"
+        "25" = "Pending Download Retry"
+        "30" = "Download Failed"
+        "40" = "Download Completed"
+        "48" = "Pending User Session"
+        "50" = "Enforcement In Progress"
+        "55" = "Pending Enforcement Retry"
+        "60" = "Enforcement Failed"
+        "70" = "Success"
+    }
+
+    foreach ($key in (Get-ChildItem -Path $officeRoot)) {
+        $stamp = getRegTime -regPath ($key.Name -replace "HKEY_LOCAL_MACHINE", "HKLM:")
+        $state = (Get-ItemProperty -Path $key.PSPath -Name FinalStatus).FinalStatus
+        $status = if ($statusMap.ContainsKey([string]$state)) { $statusMap[[string]$state] } else { "Unknown" }
+
+        $results += New-TimelineRecord -Timestamp $stamp -Name "Office 365 Apps" -Status $status -Property "M365 Apps" -Source "OfficeCSP" -Details $key.PSChildName
+    }
+
+    return $results
+}
+
+function Get-AutopilotJSONSettings {
+    $path = "HKLM:\Software\Microsoft\Provisioning\Diagnostics\AutoPilot"
+    if (-not (Test-Path $path)) {
+        return $null
+    }
+
+    $values = Get-ItemProperty -Path $path
+    [PSCustomObject]@{
+        CloudAssignedTenantDomain = $values.CloudAssignedTenantDomain
+        CloudAssignedTenantId = $values.CloudAssignedTenantId
+        CloudAssignedAadServerData = $values.CloudAssignedAadServerData
+        CloudAssignedForcedEnrollment = $values.CloudAssignedForcedEnrollment
+        CloudAssignedOobeConfig = $values.CloudAssignedOobeConfig
+        IsAutopilotDisabled = $values.IsAutopilotDisabled
+    }
+}
+
+function Main {
+    $log = New-LocalLogContext
+    Write-LocalLogLine -Path $log.TextLog -Message "Autopilot X-Ray Report v2.0 started"
+
+    $timeline = @()
+    $autopilotEvent = Get-AutopilotProfileEvent
+    if (-not $autopilotEvent) {
+        Write-Host "This is not an Autopilot device (AutopilotDDSZTDFile.json not found)."
+        Write-LocalLogLine -Path $log.TextLog -Message "Autopilot profile JSON not found. Exiting."
+        return
+    }
+
+    $imeEntries = Get-IMELogEntries
+    $appMap = Get-AppNameMapFromIME -IMEEntries $imeEntries
+
+    $timeline += $autopilotEvent
+    $timeline += Get-DeviceRegistrationEvents
+    $timeline += Get-PolicyEvents
+    $timeline += Get-SidecarInstallEvent
+    $timeline += Get-ESPStatusEvents -AppMap $appMap
+    $timeline += Get-Win32AppEvents -AppMap $appMap
+    $timeline += Get-PlatformScriptEvents
+    $timeline += Get-RemediationScriptEvents
+    $timeline += Get-IMEProcessingEvents -IMEEntries $imeEntries -AppMap $appMap
+    $timeline += Get-OfficeInstallEvents
+
+    $timeline = $timeline | Where-Object { $_ } | Sort-Object Timestamp, Property, Name -Unique
+
+    if (-not $timeline -or $timeline.Count -eq 0) {
+        Write-Host "No timeline events were found."
+        Write-LocalLogLine -Path $log.TextLog -Message "No timeline events returned from logs/registry."
+        return
+    }
+
+    $timeline | Format-Table Timestamp, Name, Status, Property, Source -AutoSize
+
+    $duration = $timeline[-1].Timestamp - $timeline[0].Timestamp
+    $durationText = "{0}h {1}m {2}s" -f [int]$duration.TotalHours, $duration.Minutes, $duration.Seconds
+    Write-Host "`nAutopilot Snapshot Duration: $durationText`n"
+
+    $timeline | Export-Csv -Path $log.CsvLog -NoTypeInformation -Encoding utf8
+    $timeline | ConvertTo-Json -Depth 5 | Out-File -FilePath $log.JsonLog -Encoding utf8
+
+    Write-LocalLogLine -Path $log.TextLog -Message "Autopilot Snapshot Duration: $durationText"
+    foreach ($row in $timeline) {
+        Write-LocalLogLine -Path $log.TextLog -Message ("[{0}] {1} | {2} | {3} | {4}" -f $row.Timestamp.ToString("yyyy-MM-dd HH:mm:ss"), $row.Name, $row.Status, $row.Property, $row.Source)
+    }
+
+    $settings = Get-AutopilotJSONSettings
+    if ($settings) {
+        Write-LocalLogLine -Path $log.TextLog -Message "Autopilot JSON Settings:"
+        ($settings | ConvertTo-Json -Depth 3) | Out-File -FilePath $log.TextLog -Append -Encoding utf8
+    }
+
+    Write-LocalLogLine -Path $log.TextLog -Message "Report complete"
+    Write-Host "CSV:  $($log.CsvLog)"
+    Write-Host "JSON: $($log.JsonLog)"
+    Write-Host "LOG:  $($log.TextLog)"
+}
+
+Main
