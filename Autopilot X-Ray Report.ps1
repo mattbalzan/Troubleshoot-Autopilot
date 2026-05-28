@@ -126,7 +126,7 @@ $Script:CategoryColors = @{
     "Device Certificate"  = "DarkYellow"
     "User Certificate"    = "DarkYellow"
     "Platform Script"     = "Blue"
-    "Remediation Script" = "DarkMagenta"
+    "Remediation Script"  = "DarkMagenta"
     "M365 Apps"           = "DarkGreen"
 }
 
@@ -655,3 +655,5 @@ function Main {
 }
 
 Main
+
+# End of script
