@@ -2,13 +2,36 @@
 # --[ Matt Balzan | mattGPT.co.uk ]
 
 <#
-    04.02.25 | Version 1.0 | Original.
-    28.05.26 | Version 2.0 | Post-build timeline snapshot with local log export.
+﻿.SYNOPSIS
+    Post-build Autopilot X-Ray snapshot - captures first-event timings for an Autopilot deployment.
 
-    Purpose:
-    Capture a timestamped Autopilot-first-event timeline after ESP completion,
-    including policies, apps, certs, Autopilot profile JSON, registration/enrollment,
-    platform scripts, remediation scripts, and Office install status.
+.DESCRIPTION
+    Runs immediately after Autopilot/ESP completes to capture a timestamped timeline of:
+    Autopilot profile JSON download, device registration, MDM enrollment, policies applied,
+    apps installed (Win32 & UWP), certificates added, Intune Windows Agent (sidecar) install,
+    platform scripts, remediation scripts and Office 365 / M365 Apps installation.
+
+    Data is collected from registry last-write timestamps (via getRegTime), Windows event logs
+    and the Intune Management Extension (IME) logs (which are also used to map app GUIDs to
+    friendly app names). The unified timeline is exported to a local log, CSV and JSON under
+    C:\ProgramData\AutopilotXRay.
+
+.NOTES
+    +------------+---------+---------+---------------------------------------------------------------------+
+    | Date       | Author  | Version | Changes                                                             |
+    |------------+---------+---------+---------------------------------------------------------------------|
+    | 2025-02-04 | mattGPT | 1.0     | Original.                                                           |
+    | 2025-02-05 | mattGPT | 1.1     | Added parse app names using GUID.                                   |
+    | 2025-02-06 | mattGPT | 1.2     | Joined results: Timestamp (local) - Name - Status - Property.       |
+    | 2025-02-07 | mattGPT | 1.3     | Added First Events, Intune Win Agent, Office & Autopilot tables.    |
+    | 2026-05-28 | mattGPT | 2.0     | Added platform & remediation script timings via IME registry/logs.  |
+    | 2026-05-28 | mattGPT | 2.0     | Added device registration & MDM enrollment event log capture.       |
+    | 2026-05-28 | mattGPT | 2.0     | Added Office 365 install timeline via OfficeCSP.                    |
+    | 2026-05-28 | mattGPT | 2.0     | Added IME log parsing to map App GUIDs to friendly names.           |
+    | 2026-05-28 | mattGPT | 2.0     | Added unified export to .log, .csv & .json in ProgramData.          |
+    | 2026-05-28 | mattGPT | 2.0     | Added Autopilot snapshot duration (first event to last event).      |
+    +------------+---------+---------+---------------------------------------------------------------------+
+
 #>
 
 Set-StrictMode -Version Latest
