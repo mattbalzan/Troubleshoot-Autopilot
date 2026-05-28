@@ -113,6 +113,96 @@ function Write-LocalLogLine {
     "$(Get-Date -Format "yyyy-MM-dd HH:mm:ss") $Message" | Out-File -FilePath $Path -Append -Encoding utf8
 }
 
+# --[ Console colour map per Property/category ]
+$Script:CategoryColors = @{
+    "Autopilot Profile"   = "Cyan"
+    "Enrollment"          = "Yellow"
+    "Policy"              = "Green"
+    "IME"                 = "Magenta"
+    "ESP"                 = "DarkCyan"
+    "Win32App"            = "White"
+    "Device UWP"          = "Gray"
+    "User UWP"            = "Gray"
+    "Device Certificate"  = "DarkYellow"
+    "User Certificate"    = "DarkYellow"
+    "Platform Script"     = "Blue"
+    "Remediation Script" = "DarkMagenta"
+    "M365 Apps"           = "DarkGreen"
+}
+
+function Get-CategoryColor {
+    param([string]$Property)
+
+    if ($Property -and $Script:CategoryColors.ContainsKey($Property)) {
+        return $Script:CategoryColors[$Property]
+    }
+    return "Gray"
+}
+
+function Get-StatusColor {
+    param([string]$Status)
+
+    switch -Regex ($Status) {
+        "(?i)fail|error|connectivity issue"        { return "Red" }
+        "(?i)success|completed|installed|succeeded|downloaded|processed|applied" { return "Green" }
+        "(?i)in progress|processing|waiting|pending|started|retry" { return "Yellow" }
+        default                                     { return "Gray" }
+    }
+}
+
+function Write-TimelineConsole {
+    param([array]$Timeline)
+
+    $col = [PSCustomObject]@{
+        Timestamp = 19
+        Name      = [Math]::Min(40, [Math]::Max(20, ($Timeline.Name      | Where-Object { $_ } | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum))
+        Status    = [Math]::Min(28, [Math]::Max(10, ($Timeline.Status    | Where-Object { $_ } | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum))
+        Property  = [Math]::Min(22, [Math]::Max(10, ($Timeline.Property  | Where-Object { $_ } | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum))
+        Source    = 32
+    }
+
+    $headerFmt = "{0,-$($col.Timestamp)}  {1,-$($col.Name)}  {2,-$($col.Status)}  {3,-$($col.Property)}  {4,-$($col.Source)}"
+    $separator = ("-" * ($col.Timestamp + $col.Name + $col.Status + $col.Property + $col.Source + 8))
+
+    Write-Host ""
+    Write-Host ($headerFmt -f "Timestamp", "Name", "Status", "Property", "Source") -ForegroundColor White
+    Write-Host $separator -ForegroundColor DarkGray
+
+    foreach ($row in $Timeline) {
+        $catColor    = Get-CategoryColor -Property $row.Property
+        $statusColor = Get-StatusColor   -Status   $row.Status
+        $name        = if ($row.Name)   { $row.Name }   else { "" }
+        $status      = if ($row.Status) { $row.Status } else { "" }
+        $property    = if ($row.Property) { $row.Property } else { "" }
+        $source      = if ($row.Source) { $row.Source } else { "" }
+        if ($name.Length     -gt $col.Name)     { $name     = $name.Substring(0, $col.Name - 1) + "…" }
+        if ($status.Length   -gt $col.Status)   { $status   = $status.Substring(0, $col.Status - 1) + "…" }
+        if ($property.Length -gt $col.Property) { $property = $property.Substring(0, $col.Property - 1) + "…" }
+        if ($source.Length   -gt $col.Source)   { $source   = $source.Substring(0, $col.Source - 1) + "…" }
+
+        Write-Host ($row.Timestamp.ToString("yyyy-MM-dd HH:mm:ss")).PadRight($col.Timestamp) -ForegroundColor DarkGray -NoNewline
+        Write-Host "  " -NoNewline
+        Write-Host $name.PadRight($col.Name)         -ForegroundColor $catColor    -NoNewline
+        Write-Host "  " -NoNewline
+        Write-Host $status.PadRight($col.Status)     -ForegroundColor $statusColor -NoNewline
+        Write-Host "  " -NoNewline
+        Write-Host $property.PadRight($col.Property) -ForegroundColor $catColor    -NoNewline
+        Write-Host "  " -NoNewline
+        Write-Host $source.PadRight($col.Source)     -ForegroundColor DarkGray
+    }
+
+    Write-Host $separator -ForegroundColor DarkGray
+}
+
+function Write-CategoryLegend {
+    Write-Host ""
+    Write-Host "Category legend:" -ForegroundColor White
+    foreach ($key in ($Script:CategoryColors.Keys | Sort-Object)) {
+        Write-Host (" * {0}" -f $key) -ForegroundColor $Script:CategoryColors[$key]
+    }
+    Write-Host ""
+}
+
 function Convert-IMELogTimestamp {
     param(
         [string]$DatePart,
@@ -499,10 +589,14 @@ function Main {
     $log = New-LocalLogContext
     Write-LocalLogLine -Path $log.TextLog -Message "Autopilot X-Ray Report v2.0 started"
 
+    Write-Host ""
+    Write-Host "Autopilot X-Ray Report v2.0" -ForegroundColor Cyan
+    Write-Host ("Computer: {0}    Started: {1}" -f $env:COMPUTERNAME, (Get-Date -Format "yyyy-MM-dd HH:mm:ss")) -ForegroundColor DarkGray
+
     $timeline = @()
     $autopilotEvent = Get-AutopilotProfileEvent
     if (-not $autopilotEvent) {
-        Write-Host "This is not an Autopilot device (AutopilotDDSZTDFile.json not found)."
+        Write-Host "This is not an Autopilot device (AutopilotDDSZTDFile.json not found)." -ForegroundColor Red
         Write-LocalLogLine -Path $log.TextLog -Message "Autopilot profile JSON not found. Exiting."
         return
     }
@@ -524,16 +618,20 @@ function Main {
     $timeline = $timeline | Where-Object { $_ } | Sort-Object Timestamp, Property, Name -Unique
 
     if (-not $timeline -or $timeline.Count -eq 0) {
-        Write-Host "No timeline events were found."
+        Write-Host "No timeline events were found." -ForegroundColor Red
         Write-LocalLogLine -Path $log.TextLog -Message "No timeline events returned from logs/registry."
         return
     }
 
-    $timeline | Format-Table Timestamp, Name, Status, Property, Source -AutoSize
+    Write-TimelineConsole -Timeline $timeline
+    Write-CategoryLegend
 
     $duration = $timeline[-1].Timestamp - $timeline[0].Timestamp
     $durationText = "{0}h {1}m {2}s" -f [int]$duration.TotalHours, $duration.Minutes, $duration.Seconds
-    Write-Host "`nAutopilot Snapshot Duration: $durationText`n"
+    Write-Host ""
+    Write-Host "Autopilot Snapshot Duration: " -ForegroundColor White -NoNewline
+    Write-Host $durationText -ForegroundColor Yellow
+    Write-Host ""
 
     $timeline | Export-Csv -Path $log.CsvLog -NoTypeInformation -Encoding utf8
     $timeline | ConvertTo-Json -Depth 5 | Out-File -FilePath $log.JsonLog -Encoding utf8
@@ -550,9 +648,10 @@ function Main {
     }
 
     Write-LocalLogLine -Path $log.TextLog -Message "Report complete"
-    Write-Host "CSV:  $($log.CsvLog)"
-    Write-Host "JSON: $($log.JsonLog)"
-    Write-Host "LOG:  $($log.TextLog)"
+    Write-Host "Exports:" -ForegroundColor White
+    Write-Host "  CSV:  " -ForegroundColor DarkGray -NoNewline; Write-Host $log.CsvLog  -ForegroundColor Green
+    Write-Host "  JSON: " -ForegroundColor DarkGray -NoNewline; Write-Host $log.JsonLog -ForegroundColor Green
+    Write-Host "  LOG:  " -ForegroundColor DarkGray -NoNewline; Write-Host $log.TextLog -ForegroundColor Green
 }
 
 Main
