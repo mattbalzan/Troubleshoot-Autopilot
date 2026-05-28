@@ -1,8 +1,5 @@
-# --[ Autopilot X-Ray Report      ]
-# --[ Matt Balzan | mattGPT.co.uk ]
-
 <#
-﻿.SYNOPSIS
+.SYNOPSIS
     Post-build Autopilot X-Ray snapshot - captures first-event timings for an Autopilot deployment.
 
 .DESCRIPTION
