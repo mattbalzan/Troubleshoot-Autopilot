@@ -420,20 +420,18 @@ Get-ChildItem $enrollmentsPath -ErrorAction SilentlyContinue | Where-Object { Te
     }
 }
 
-# Hardware info via ADK oa3tool (best effort)
-$adkPath = Get-ItemPropertyValue 'HKLM:\Software\Microsoft\Windows Kits\Installed Roots' -Name KitsRoot10 -ErrorAction SilentlyContinue
-$oa3Tool = "$adkPath\Assessment and Deployment Kit\Deployment Tools\$($env:PROCESSOR_ARCHITECTURE)\Licensing\OA30\oa3tool.exe"
-if ($hash -and (Test-Path $oa3Tool)) {
-    try {
-        $output = & "$oa3Tool" "/decodehwhash:$hash"
-        [xml]$hx = $output | Select-Object -Skip 8 -First ($output.Count - 12)
-        $hardware['OS build']     = $hx.SelectSingleNode("//p[@n='OsBuild']").v
-        $hardware['Manufacturer'] = $hx.SelectSingleNode("//p[@n='SmbiosSystemManufacturer']").v
-        $hardware['Model']        = $hx.SelectSingleNode("//p[@n='SmbiosSystemProductName']").v
-        $hardware['Serial number']= $hx.SelectSingleNode("//p[@n='SmbiosSystemSerialNumber']").v
-        $hardware['TPM version']  = $hx.SelectSingleNode("//p[@n='TPMVersion']").v
-    } catch { Write-Log "oa3tool hardware decode failed: $($_.Exception.Message)" 'WARN' }
-}
+# Hardware info via WMI/CIM (best effort)
+try {
+    $cs   = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction SilentlyContinue
+    $bios = Get-CimInstance -ClassName Win32_BIOS -ErrorAction SilentlyContinue
+    $os   = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction SilentlyContinue
+    $tpm  = Get-CimInstance -Namespace 'root\cimv2\Security\MicrosoftTpm' -ClassName Win32_Tpm -ErrorAction SilentlyContinue
+    if ($os)   { $hardware['OS build']      = $os.BuildNumber }
+    if ($cs)   { $hardware['Manufacturer']  = $cs.Manufacturer }
+    if ($cs)   { $hardware['Model']         = $cs.Model }
+    if ($bios) { $hardware['Serial number'] = $bios.SerialNumber }
+    if ($tpm -and $tpm.SpecVersion) { $hardware['TPM version'] = ($tpm.SpecVersion -split ',')[0].Trim() }
+} catch { Write-Log "WMI/CIM hardware query failed: $($_.Exception.Message)" 'WARN' }
 
 # ---------------------------------------------------------------------------
 # region  8. Run the processors
